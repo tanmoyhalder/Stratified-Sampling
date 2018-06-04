@@ -1,0 +1,97 @@
+# Finding a Treatment for a given Control group
+# Solution: Basis on Control, Mapping with category1 & Category2
+# calculating the Proportions basis on category1 & Category2
+# Extracting the Population by excluding the Control group
+# Apply Strata on the population with the calculated proportions
+# Verifying the results/ proportions of control & Treatment groups.
+
+# SQL RODBC connection
+library(RODBC)
+mycon = odbcConnect(dsn="XXXDataMart")
+setwd("~\\myfolder")
+
+# Extracting the control group with the Segement & SeatSize 
+
+sample_ctrl= sqlQuery(mycon,"select ctrl.Id, Cat1,
+                      Cat2 from [dbo].[Control_group] ctrl (nolock)
+                      left join  [dbo].[DBName] A (nolock)
+                      on ctrl.Id = A.Id and A.SnapShotMonthID=201712")
+
+# Wherever SeatSize & Usagesegment is Blank, Excluding them from the analysis
+sample1 = na.omit(sample_ctrl)
+Var1 <-"Cat1"
+Var2 <- "Cat2"
+
+# Making a temporary assigment for calculating the proportions 
+control <- sample1
+
+# Loading Sampling Package
+library(sampling)
+
+# Calculating the proportions
+Proportions<- prop.table(table(control[,c(Var1,Var2)]))
+
+# Requires a transpose for matching the Proportions and Strata calcula
+Proportions<-t(Proportions)
+Proportions<-Proportions*nrow(control)
+Proportions<-ceiling(Proportions)
+#Adding one value for each proportions to get rid of zero value
+Proportions <- Proportions+1
+
+# Extracting the population of randomly 50,000 observations by excluding 
+# control group..
+
+sample= sqlQuery(mycon,"select top 50000 A.Id,Cat1,Cat2
+                 from [dbo].[DBName] A (nolock)
+                 LEFT join [dbo].[Control_group] ctrl (nolock)
+                 on ctrl.Id = A.Id
+                 WHERE ctrl.Id IS NULL ORDER BY RAND()")
+
+# For proportions match :
+#Adding a dummy variable for Cat1 Level1 and Cat2 Level1,
+
+dummy=data.frame(OMSTenantID="Dummy", Cat2 = "L1", Cat1="L1")
+population=rbind(sample,dummy)
+population = population[order(population[,Var1],population[,Var2]),]
+
+table(population$Cat1,population$Cat2)
+
+# Implenation of Strata by Segment and SeatSize with the control group proportions
+set.seed(123)
+strata = strata(data=population,stratanames = c(Var1,Var2),size= Proportions,
+                method="srswor",description = T)
+
+# Mapping TenantID from population & Strata
+strata$Series=row.names(strata)
+
+population$Series=row.names(population)
+
+sample_treatment=merge(population,strata,by="Series")
+
+head(sample_treatment)
+
+sample_treatment=subset(sample_treatment,select=c(Id,Cat2.x,
+                                                  Cat1.x))
+sample_treatment$group=rep("Treatment",nrow(sample_treatment))
+
+sample_ctrl$group=rep("control",nrow(sample_ctrl))
+colnames(sample_treatment)=colnames(sample_ctrl)
+
+# Requires to remove one Row from Each Unique group, since we have add 1 to the earlier
+# proportions
+sample_treatment$x=paste(sample_treatment$Cat2,sample_treatment$Cat1)
+sample_treatment=sample_treatment[order(sample_treatment$x),]
+
+sample_treatment$x=as.factor(sample_treatment$x)
+dat=sample_treatment
+idx <- (unlist(tapply(1:nrow(dat), dat$x, tail, -1)))
+idx=as.data.frame(idx)
+dat$rows=c(1:nrow(dat))
+
+sample_treatment=merge(dat,idx,by.x = "rows",by.y = "idx")
+sample_treatment$x=NULL
+sample_treatment$rows=NULL
+
+sample_final=rbind(sample_ctrl,sample_treatment)
+
+write.csv(sample_final,"~\\myfolder\\stratified_final.csv")
